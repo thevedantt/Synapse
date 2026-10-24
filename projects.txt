@@ -1,0 +1,62 @@
+SYNAPSE - MCP-Powered Enterprise AI Agent
+==========================================
+
+WHAT IT IS
+----------
+3 parts:
+1. MCP servers   - small programs, one per tool (Postgres, Slack, Sheets...).
+                   Each exposes functions like run_sql, send_message, create_sheet.
+2. Agent (MCP client) - connects to all servers, asks "what tools do you have?"
+                   (= dynamic tool discovery), passes list to LLM.
+3. LLM loop      - LLM picks tool -> agent runs it -> result back to LLM -> repeat until done.
+
+Example flow ("Analyze last month's sales and create a report"):
+  query -> LLM calls postgres.run_sql -> gets rows -> analyzes
+        -> sheets.create_report -> slack.send_message -> done
+
+
+TECH STACK
+----------
+Language     : Python (official MCP SDK / FastMCP, good for data work)
+LLM          : Claude API (built-in tool calling)
+MCP servers  : mcp Python SDK, one small file per tool
+Backend      : FastAPI (serve agent over HTTP / websocket)
+DB           : PostgreSQL + fake sales data
+Memory       : Postgres table for chat history (context-aware)
+Frontend     : Next.js chat UI (or Streamlit for speed), shows tool calls live
+Deploy       : Docker Compose (one command runs everything)
+
+
+BUILD ORDER
+-----------
+Phase 1 (MVP) : Postgres server + agent loop + CLI chat.
+                Get "analyze last month's sales" working.
+Phase 2       : Add Google Sheets + Slack servers. Full report flow.
+Phase 3       : Web UI showing each step ("calling run_sql...").
+Phase 4       : Production: logging, retries, approval before sending, auth,
+                tool-call history.
+
+
+EXTRA TOOLS (LATER)
+-------------------
+- CRM: HubSpot (free tier) or fake CRM server
+- Gmail / email
+- GitHub / Jira
+- Filesystem / PDF report generator
+- Charts (matplotlib -> PNG)
+- Web search
+- Calendar
+
+
+HONESTY NOTE
+------------
+Resume says "15+ tools". Only claim what is actually built - interviewers ask.
+5-6 real working tools > 15 fake. Count functions instead:
+"15+ tool functions across 6 MCP servers" = true claim.
+
+
+OPEN DECISIONS
+--------------
+1. Language: Python or TypeScript?
+2. LLM: Claude, OpenAI, or free (Ollama)?
+3. Real Slack/Google accounts, or mock servers first?
