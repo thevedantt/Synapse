@@ -81,14 +81,14 @@ export default function ChatPage() {
 
   return (
     <main className="mx-auto flex h-dvh w-full max-w-4xl flex-col">
-      <header className="flex items-center justify-between border-b p-4">
-        <h1 className="text-2xl font-semibold">
+      <header className="flex items-center justify-between gap-2 border-b px-3 py-3 sm:p-4">
+        <h1 className="text-xl font-semibold sm:text-2xl">
           Syn<span className="text-vibe-purple">apse</span>
         </h1>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           {me && (
             <div className="flex items-center gap-2">
-              <div className="text-right text-sm">
+              <div className="hidden text-right text-sm sm:block">
                 <p>{me.name}</p>
                 <p className="text-xs text-muted-foreground">
                   {me.role}
@@ -116,12 +116,17 @@ export default function ChatPage() {
         </div>
       ) : (
         <>
-          <section className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
+          <section className="flex flex-1 flex-col gap-4 overflow-y-auto p-3 sm:p-4">
             {messages.length === 0 && (
               <div className="m-auto flex max-w-md flex-col items-center gap-3 text-center">
                 <p className="text-muted-foreground">Ask about sales, customers or products.</p>
                 {SUGGESTIONS.map((s) => (
-                  <Button key={s} variant="secondary" className="w-full" onClick={() => send(s)}>
+                  <Button
+                    key={s}
+                    variant="secondary"
+                    className="h-auto w-full py-2 whitespace-normal"
+                    onClick={() => send(s)}
+                  >
                     {s}
                   </Button>
                 ))}
@@ -132,12 +137,12 @@ export default function ChatPage() {
               m.role === "user" ? (
                 <div
                   key={i}
-                  className="max-w-[80%] self-end rounded-lg bg-primary px-4 py-2 text-primary-foreground"
+                  className="max-w-[85%] self-end rounded-lg bg-primary px-4 py-2 break-words text-primary-foreground sm:max-w-[80%]"
                 >
                   {m.text}
                 </div>
               ) : (
-                <div key={i} className="flex max-w-[90%] flex-col gap-2 self-start">
+                <div key={i} className="flex max-w-full min-w-0 flex-col gap-2 self-start sm:max-w-[90%]">
                   {!!m.toolCalls?.length && (
                     <details className="rounded-lg border px-3 py-2 text-sm">
                       <summary className="cursor-pointer text-vibe-purple">
@@ -158,7 +163,7 @@ export default function ChatPage() {
                     </details>
                   )}
                   <div
-                    className={`prose-chat rounded-lg px-4 py-3 ${
+                    className={`prose-chat min-w-0 rounded-lg px-3 py-3 break-words sm:px-4 ${
                       m.blocked ? "border border-vibe-purple" : "bg-muted"
                     }`}
                   >
@@ -181,7 +186,7 @@ export default function ChatPage() {
               e.preventDefault();
               send(input);
             }}
-            className="flex gap-2 border-t p-4"
+            className="flex gap-2 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4"
           >
             <Input
               value={input}

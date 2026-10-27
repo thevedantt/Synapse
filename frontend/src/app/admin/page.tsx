@@ -81,9 +81,9 @@ export default function AdminPage() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-6">
+    <main className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-3 sm:gap-6 sm:p-6">
       <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">
+        <h1 className="text-xl font-semibold sm:text-2xl">
           Syn<span className="text-vibe-purple">apse</span>{" "}
           <span className="text-muted-foreground">Admin</span>
         </h1>
@@ -111,14 +111,14 @@ export default function AdminPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <form
-            className="flex flex-wrap items-center gap-2"
+            className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center"
             onSubmit={async (e) => {
               e.preventDefault();
               if (await save(draft)) setDraft({ email: "", name: "", role: "analyst", region: null });
             }}
           >
             <Input
-              className="w-56"
+              className="w-full sm:w-56"
               type="email"
               placeholder="Email"
               required
@@ -126,7 +126,7 @@ export default function AdminPage() {
               onChange={(e) => setDraft({ ...draft, email: e.target.value })}
             />
             <Input
-              className="w-44"
+              className="w-full sm:w-44"
               placeholder="Name"
               required
               value={draft.name}
@@ -168,10 +168,9 @@ export default function AdminPage() {
               <thead className="text-left text-muted-foreground">
                 <tr className="border-b">
                   <th className="py-2 pr-4 font-medium">Name</th>
-                  <th className="py-2 pr-4 font-medium">Email</th>
-                  <th className="py-2 pr-4 font-medium">Role</th>
-                  <th className="py-2 pr-4 font-medium">Region</th>
-                  <th />
+                  <th className="hidden py-2 pr-4 font-medium md:table-cell">Email</th>
+                  <th className="py-2 pr-4 font-medium">Access</th>
+                  <th className="hidden md:table-cell" />
                 </tr>
               </thead>
               <tbody>
@@ -180,44 +179,56 @@ export default function AdminPage() {
                     <td className="py-2 pr-4">
                       <div className="flex items-center gap-2">
                         <UserAvatar name={u.name} image={u.image} />
-                        {u.name}
+                        <div className="min-w-0">
+                          <p>{u.name}</p>
+                          <p className="truncate text-xs text-muted-foreground md:hidden">{u.email}</p>
+                        </div>
                       </div>
                     </td>
-                    <td className="py-2 pr-4 text-muted-foreground">{u.email}</td>
-                    <td className="py-2 pr-4">
-                      <select
-                        className={selectClass}
-                        value={u.role}
-                        onChange={(e) => {
-                          const role = e.target.value as Role;
-                          save({ ...u, role, region: role === "manager" ? u.region ?? "North" : null });
-                        }}
-                      >
-                        {ROLES.map((r) => (
-                          <option key={r} value={r} className="bg-grey-black">
-                            {r}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="py-2 pr-4">
-                      {u.role === "manager" ? (
+                    <td className="hidden py-2 pr-4 text-muted-foreground md:table-cell">{u.email}</td>
+                    <td className="py-2 pr-2 md:pr-4">
+                      {/* Role + region side by side on desktop, stacked with Remove on phones. */}
+                      <div className="flex flex-col items-start gap-1 md:flex-row md:items-center md:gap-2">
                         <select
                           className={selectClass}
-                          value={u.region ?? ""}
-                          onChange={(e) => save({ ...u, region: e.target.value })}
+                          value={u.role}
+                          onChange={(e) => {
+                            const role = e.target.value as Role;
+                            save({ ...u, role, region: role === "manager" ? u.region ?? "North" : null });
+                          }}
                         >
-                          {REGIONS.map((r) => (
+                          {ROLES.map((r) => (
                             <option key={r} value={r} className="bg-grey-black">
                               {r}
                             </option>
                           ))}
                         </select>
-                      ) : (
-                        <span className="text-muted-foreground">All</span>
-                      )}
+                        {u.role === "manager" ? (
+                          <select
+                            className={selectClass}
+                            value={u.region ?? ""}
+                            onChange={(e) => save({ ...u, region: e.target.value })}
+                          >
+                            {REGIONS.map((r) => (
+                              <option key={r} value={r} className="bg-grey-black">
+                                {r}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="hidden text-xs text-muted-foreground md:inline">all regions</span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="px-1 md:hidden"
+                          onClick={() => remove(u.email)}
+                        >
+                          Remove
+                        </Button>
+                      </div>
                     </td>
-                    <td className="py-2 text-right">
+                    <td className="hidden py-2 text-right md:table-cell">
                       <Button variant="ghost" size="sm" onClick={() => remove(u.email)}>
                         Remove
                       </Button>
@@ -239,7 +250,7 @@ export default function AdminPage() {
           <table className="w-full text-sm">
             <thead className="text-left text-muted-foreground">
               <tr className="border-b">
-                <th className="py-2 pr-4 font-medium">Time</th>
+                <th className="hidden py-2 pr-4 font-medium md:table-cell">Time</th>
                 <th className="py-2 pr-4 font-medium">User</th>
                 <th className="py-2 pr-4 font-medium">Question</th>
                 <th className="py-2 pr-4 font-medium">Result</th>
@@ -248,14 +259,17 @@ export default function AdminPage() {
             <tbody>
               {audit.map((a) => (
                 <tr key={a.id} className="border-b align-top last:border-0">
-                  <td className="py-2 pr-4 whitespace-nowrap text-muted-foreground">
+                  <td className="hidden py-2 pr-4 whitespace-nowrap text-muted-foreground md:table-cell">
                     {new Date(a.at).toLocaleString("en-IN")}
                   </td>
                   <td className="py-2 pr-4">
                     {a.user_email}
                     <div className="text-xs text-muted-foreground">{a.role}</div>
+                    <div className="text-xs text-muted-foreground md:hidden">
+                      {new Date(a.at).toLocaleString("en-IN")}
+                    </div>
                   </td>
-                  <td className="py-2 pr-4">
+                  <td className="max-w-xs py-2 pr-4 break-words sm:max-w-md">
                     {a.question}
                     {a.tool_calls.some((c) => c.input?.sql) && (
                       <details className="mt-1">
