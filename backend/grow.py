@@ -127,8 +127,12 @@ def new_customers(n: int, day: date) -> list[tuple]:
     return rows
 
 
+def get_database_url() -> str:
+    return os.environ["DATABASE_URL"].strip()
+
+
 def main() -> None:
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+    with psycopg.connect(get_database_url()) as conn:
         today = conn.execute("SELECT current_date").fetchone()[0]  # the DB's "today"
         start = today - timedelta(days=DAYS - 1)
         if conn.execute("SELECT count(*) FROM products").fetchone()[0] < 30:
