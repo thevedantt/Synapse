@@ -16,11 +16,12 @@ from contextlib import AsyncExitStack, asynccontextmanager
 import boto3
 import jwt
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, EmailStr, Field, model_validator
 
 from agent import BACKEND_DIR, MODEL, connect_servers, run_turn
@@ -41,17 +42,20 @@ BLOCKED_REPLY = (
     "sales, customers, products and reports."
 )
 state: dict = {}
-# ponytail: chat history lives in memory, lost on restart; move to a Postgres table when needed
-sessions: dict[str, dict] = {}  # session_id -> {"email": owner, "messages": [...]}
+# App queries (users, audit, chats) reuse open connections instead of a new one each time.
+pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=False, check=ConnectionPool.check_connection,
+                      kwargs={"row_factory": dict_row, "connect_timeout": 10})
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Start the MCP servers once at boot, shared by every request.
     async with AsyncExitStack() as stack:
-        state["tools"], state["owner"] = await connect_servers(stack)
+        state["tools"], state["owner"], state["context"] = await connect_servers(stack)
         state["client"] = boto3.client("bedrock-runtime", region_name=os.environ["AWS_REGION"])
+        pool.open()
         yield
+        pool.close()
 
 
 app = FastAPI(title="Synapse", lifespan=lifespan)
@@ -64,10 +68,15 @@ app.add_middleware(
 
 
 def db(sql: str, params: tuple = ()) -> list[dict]:
-    """App-level queries (users, audit log) with the owner connection, not the agent's."""
-    with psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10) as conn:
-        cur = conn.execute(sql, params)
-        return cur.fetchall() if cur.description else []
+    """App-level queries (users, audit log, chats) with the owner login, not the agent's."""
+    for attempt in range(2):
+        with pool.connection(timeout=15) as conn:
+            try:
+                cur = conn.execute(sql, params)
+                return cur.fetchall() if cur.description else []
+            except psycopg.OperationalError:
+                if attempt or not conn.broken:  # retry once only if Neon dropped the connection
+                    raise
 
 
 def verify_token(token: str) -> dict:
@@ -125,7 +134,7 @@ def audit(user: dict, question: str, tool_calls: list, status: str, detail: str 
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    session_id: str | None = None  # omit to start a new conversation
+    session_id: uuid.UUID | None = None  # omit to start a new conversation
 
 
 class ChatResponse(BaseModel):
@@ -150,29 +159,75 @@ def list_tools(user: dict = Depends(current_user)):
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, user: dict = Depends(current_user)):
-    session_id = req.session_id or str(uuid.uuid4())
-    session = sessions.setdefault(session_id, {"email": user["email"], "messages": []})
-    if session["email"] != user["email"]:
-        raise HTTPException(403, "This conversation belongs to another user")
-    # ponytail: input-only guardrail; add a source="OUTPUT" check on the reply if needed
-    reason = await asyncio.to_thread(check_guardrail, req.message)
-    if reason:
-        await asyncio.to_thread(audit, user, req.message, [], "blocked", reason)
-        return ChatResponse(session_id=session_id, reply=BLOCKED_REPLY, tool_calls=[], blocked=True)
+async def chat(req: ChatRequest, background: BackgroundTasks, user: dict = Depends(current_user)):
+    # Chats live in Postgres: survive restarts, and any API worker can continue them.
+    messages, turns = [], []
+    if req.session_id:
+        rows = await asyncio.to_thread(
+            db, "SELECT messages, turns FROM chats WHERE id = %s AND user_email = %s",
+            (req.session_id, user["email"]))
+        if not rows:
+            raise HTTPException(404, "Chat not found")
+        messages, turns = rows[0]["messages"], rows[0]["turns"]
+    session_id = str(req.session_id or uuid.uuid4())
 
-    messages = session["messages"]
+    # Guardrail runs in parallel with the first LLM call (saves ~1s); run_turn waits for it
+    # before running any tool or showing anything.
+    # ponytail: input-only guardrail; add a source="OUTPUT" check on the reply if needed
+    guard = asyncio.create_task(asyncio.to_thread(check_guardrail, req.message))
     start = len(messages)
     messages.append({"role": "user", "content": [{"text": req.message}]})
     try:
-        result = await run_turn(state["client"], state["tools"], state["owner"], messages, user)
-    except Exception as e:
-        del messages[start:]  # roll back this turn so the history stays valid
-        await asyncio.to_thread(audit, user, req.message, [], "error", str(e)[:500])
+        result = await run_turn(state["client"], state["tools"], state["owner"], messages, user,
+                                state["context"], gate=guard)
+    except Exception as e:  # nothing saved, so the stored history stays valid
+        guard.cancel()
+        background.add_task(audit, user, req.message, [], "error", str(e)[:500])
         log.exception("Agent turn failed")  # full error in server log
         raise HTTPException(502, "Sorry, I couldn't answer that right now. Please try again.") from e
-    await asyncio.to_thread(audit, user, req.message, result["tool_calls"], "ok")
+    if result.get("blocked"):
+        del messages[start:]  # blocked questions never reach the model's history
+        background.add_task(audit, user, req.message, [], "blocked", guard.result())
+        result = {"reply": BLOCKED_REPLY, "tool_calls": [], "blocked": True}
+    else:
+        background.add_task(audit, user, req.message, result["tool_calls"], "ok")
+    turns.append({"question": req.message, **result})
+    # Saved after the reply is sent (the user doesn't wait for the slow DB round trip).
+    # ponytail: a follow-up sent within ~1s could miss this save; fine for human typing speed
+    background.add_task(save_chat, session_id, user["email"], messages, turns)
     return ChatResponse(session_id=session_id, **result)
+
+
+def save_chat(chat_id: str, email: str, messages: list, turns: list) -> None:
+    db("INSERT INTO chats (id, user_email, title, messages, turns) VALUES (%s, %s, %s, %s, %s) "
+       "ON CONFLICT (id) DO UPDATE SET messages = EXCLUDED.messages, turns = EXCLUDED.turns, "
+       "updated_at = now()",
+       (chat_id, email, turns[0]["question"][:80], Jsonb(messages), Jsonb(turns)))
+
+
+@app.get("/chats")
+async def list_chats(user: dict = Depends(current_user)):
+    """The user's recent conversations, newest first (for the sidebar)."""
+    return await asyncio.to_thread(
+        db, "SELECT id, title, updated_at FROM chats WHERE user_email = %s "
+            "ORDER BY updated_at DESC LIMIT 50", (user["email"],))
+
+
+@app.get("/chats/{chat_id}")
+async def get_chat(chat_id: uuid.UUID, user: dict = Depends(current_user)):
+    rows = await asyncio.to_thread(
+        db, "SELECT id, title, turns FROM chats WHERE id = %s AND user_email = %s",
+        (chat_id, user["email"]))
+    if not rows:
+        raise HTTPException(404, "Chat not found")
+    return rows[0]
+
+
+@app.delete("/chats/{chat_id}")
+async def delete_chat(chat_id: uuid.UUID, user: dict = Depends(current_user)):
+    await asyncio.to_thread(
+        db, "DELETE FROM chats WHERE id = %s AND user_email = %s", (chat_id, user["email"]))
+    return {"ok": True}
 
 
 @app.get("/reports/{report_id}")
