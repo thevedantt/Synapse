@@ -5,6 +5,7 @@ Docs: http://localhost:8000/docs
 """
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -22,7 +23,9 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, EmailStr, Field, model_validator
 
-from agent import MODEL, connect_servers, run_turn
+from agent import BACKEND_DIR, MODEL, connect_servers, run_turn
+
+REPORTS_DIR = BACKEND_DIR / "reports"  # written by servers/report_server.py
 
 log = logging.getLogger("synapse")
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -170,6 +173,18 @@ async def chat(req: ChatRequest, user: dict = Depends(current_user)):
         raise HTTPException(502, "Sorry, I couldn't answer that right now. Please try again.") from e
     await asyncio.to_thread(audit, user, req.message, result["tool_calls"], "ok")
     return ChatResponse(session_id=session_id, **result)
+
+
+@app.get("/reports/{report_id}")
+def get_report(report_id: uuid.UUID, user: dict = Depends(current_user)):
+    """A report made by create_report. Only its owner (or an admin) can download it."""
+    path = REPORTS_DIR / f"{report_id}.json"  # UUID type blocks path tricks like ../
+    if not path.exists():
+        raise HTTPException(404, "Report not found")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report["owner"].lower() != user["email"].lower() and user["role"] != "admin":
+        raise HTTPException(404, "Report not found")  # don't reveal it exists
+    return report
 
 
 # ---------- Admin (admins only, enforced here on the server) ----------

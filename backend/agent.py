@@ -7,6 +7,7 @@ Run: uv run python agent.py
 import asyncio
 import json
 import os
+import re
 import sys
 from contextlib import AsyncExitStack
 from datetime import date
@@ -25,6 +26,9 @@ MAX_STEPS = 15  # hard stop so a confused loop can't burn credits
 # Every MCP server the agent connects to. Add a line here to add a tool source.
 SERVERS = {
     "postgres": BACKEND_DIR / "servers" / "postgres_server.py",
+    "slack": BACKEND_DIR / "servers" / "slack_server.py",
+    "reports": BACKEND_DIR / "servers" / "report_server.py",
+    "sheets": BACKEND_DIR / "servers" / "sheets_server.py",
 }
 
 SYSTEM = f"""You are Synapse, an enterprise assistant with access to company tools.
@@ -37,7 +41,13 @@ Answer with a short summary of the findings, key numbers, and insights.
 Data access depends on the user's role and is enforced by the database: if a query
 returns no rows or a permission error, say the data is outside their access.
 Some columns (e.g. customer email) may be hidden for their role: if a column they ask
-for isn't visible, say it is restricted for their role, not that it doesn't exist."""
+for isn't visible, say it is restricted for their role, not that it doesn't exist.
+Only send to Slack when the user explicitly asks; get the data first, then send a short
+summary, then tell the user it was sent.
+Only create a report when the user asks for one. Pass all the data you found to
+create_report, then give the user its download_url exactly as returned (it starts with
+/api/reports/, no domain) as a Markdown link: [Download report](/api/reports/...).
+Only export to Google Sheets when the user asks; then share the returned url as a link."""
 
 
 def system_prompt(user: dict) -> str:
@@ -73,7 +83,7 @@ async def call_tool(owner: dict[str, ClientSession], tool_use: dict, user: dict)
     `user` travels as MCP metadata (not a tool argument), so the LLM can't see or change it."""
     name, args = tool_use["name"], tool_use.get("input") or {}
     try:
-        meta = {"synapse/user": {"role": user["role"], "region": user.get("region")}}
+        meta = {"synapse/user": {k: user.get(k) for k in ("email", "role", "region", "name")}}
         result = await owner[name].call_tool(name, args, meta=meta)
         text = "\n".join(c.text for c in result.content if c.type == "text")
         text = text or json.dumps(result.structured_content)
@@ -101,6 +111,8 @@ async def run_turn(client, tools: list, owner: dict, messages: list, user: dict)
 
         if response["stopReason"] != "tool_use":
             text = "".join(b["text"] for b in message["content"] if "text" in b)
+            # Models sometimes invent a domain for our relative report links; strip it.
+            text = re.sub(r"https?://[^\s)\]]*?(/api/reports/[\w-]+)", r"\1", text)
             if response["stopReason"] == "max_tokens":
                 text += "\n[Answer cut off: hit max tokens.]"
             return {"reply": text, "tool_calls": tool_calls}
