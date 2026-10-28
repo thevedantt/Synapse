@@ -30,9 +30,9 @@ GRANT synapse_manager TO synapse_mgr_north, synapse_mgr_south, synapse_mgr_east,
 GRANT USAGE ON SCHEMA public TO synapse_admin, synapse_analyst, synapse_manager;
 
 -- Table / column access (SELECT only: no writes even without read-only mode).
-GRANT SELECT ON customers, products, orders TO synapse_admin, synapse_manager;
-GRANT SELECT ON products, orders TO synapse_analyst;
-GRANT SELECT (id, name, city, region, created_at) ON customers TO synapse_analyst;  -- no email
+GRANT SELECT ON customers, products, orders, reviews, inventory, festivals TO synapse_admin, synapse_manager;
+GRANT SELECT ON products, orders, reviews, inventory, festivals TO synapse_analyst;
+GRANT SELECT (id, name, city, region, pincode, created_at) ON customers TO synapse_analyst;  -- no email/phone
 
 -- Row Level Security: rows filtered by the DB on every query.
 ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
@@ -45,6 +45,15 @@ CREATE POLICY own_region ON customers FOR SELECT TO synapse_manager
 CREATE POLICY all_rows ON orders FOR SELECT TO synapse_admin, synapse_analyst USING (true);
 CREATE POLICY own_region ON orders FOR SELECT TO synapse_manager
   USING (customer_id IN (SELECT id FROM customers));  -- customers is already region-filtered
+
+ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+CREATE POLICY all_rows ON reviews FOR SELECT TO synapse_admin, synapse_analyst USING (true);
+CREATE POLICY own_region ON reviews FOR SELECT TO synapse_manager
+  USING (order_id IN (SELECT id FROM orders));  -- orders is already region-filtered
+CREATE POLICY all_rows ON inventory FOR SELECT TO synapse_admin, synapse_analyst USING (true);
+CREATE POLICY own_region ON inventory FOR SELECT TO synapse_manager
+  USING (lower(region) = substring(current_user FROM '^synapse_mgr_(.+)$'));
 
 -- App users (demo users for now; Neon Auth login links to these later).
 CREATE TABLE IF NOT EXISTS app_users (
@@ -74,4 +83,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
   status text NOT NULL CHECK (status IN ('ok', 'blocked', 'error')),
   detail text
 );
--- app_users and audit_log get no grants: the agent's logins cannot read them.
+-- Saved conversations. messages = full model history, turns = what the UI shows.
+CREATE TABLE IF NOT EXISTS chats (
+  id uuid PRIMARY KEY,
+  user_email text NOT NULL,
+  title text NOT NULL,
+  messages jsonb NOT NULL DEFAULT '[]',
+  turns jsonb NOT NULL DEFAULT '[]',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS chats_user ON chats (user_email, updated_at DESC);
+-- app_users, audit_log and chats get no grants: the agent's logins cannot read them.
