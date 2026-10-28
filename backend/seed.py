@@ -25,3 +25,4 @@ with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         conn.execute((here / name).read_text(encoding="utf-8"))
     count = conn.execute("SELECT count(*) FROM orders").fetchone()[0]
 print(f"Seeded {count} orders, with roles and row-level security.")
+print("Now run grow.py to fill 180 days of big, realistic data.")

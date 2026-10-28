@@ -1,0 +1,21 @@
+# Adds ~25 customers and ~1500 orders to the demo database every day (backend/grow.py).
+name: Grow demo data
+
+on:
+  schedule:
+    - cron: "30 0 * * *"  # 06:00 IST daily
+  workflow_dispatch: {}  # "Run workflow" button in the Actions tab
+
+jobs:
+  grow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run python grow.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
