@@ -18,6 +18,14 @@ type Message = {
   text: string;
   toolCalls?: ToolCall[];
   blocked?: boolean;
+  verification?: Verification | null;
+};
+// Trust layer: how many numbers in the answer were proven against the data.
+type Verification = {
+  checked: number;
+  verified: number;
+  unverified: string[];
+  truncated: boolean;
 };
 type Me = {
   name: string;
@@ -31,6 +39,7 @@ type ChatReply = {
   reply: string;
   tool_calls: ToolCall[];
   blocked: boolean;
+  verification?: Verification | null;
 };
 type ChatSummary = { id: string; title: string; updated_at: string };
 type Turn = {
@@ -38,6 +47,7 @@ type Turn = {
   reply: string;
   tool_calls: ToolCall[];
   blocked?: boolean;
+  verification?: Verification | null;
 };
 
 const SUGGESTIONS = [
@@ -85,6 +95,7 @@ export default function ChatPage() {
             text: t.reply,
             toolCalls: t.tool_calls,
             blocked: t.blocked,
+            verification: t.verification,
           },
         ]),
       );
@@ -128,6 +139,7 @@ export default function ChatPage() {
           text: data.reply,
           toolCalls: data.tool_calls,
           blocked: data.blocked,
+          verification: data.verification,
         },
       ]);
       setTimeout(loadChats, 1500); // the backend saves the chat just after replying
@@ -304,6 +316,9 @@ export default function ChatPage() {
                     >
                       <ReactMarkdown>{m.text}</ReactMarkdown>
                     </div>
+                    {!!m.verification?.checked && (
+                      <TrustBadge v={m.verification} />
+                    )}
                   </div>
                 ),
               )}
@@ -338,5 +353,24 @@ export default function ChatPage() {
         )}
       </main>
     </div>
+  );
+}
+
+function TrustBadge({ v }: { v: Verification }) {
+  const ok = v.unverified.length === 0;
+  return (
+    <p
+      className={`self-start rounded-md px-2 py-1 text-xs ${
+        ok
+          ? "bg-lavender/15 text-lavender"
+          : "border border-vibe-purple text-vibe-purple"
+      }`}
+      title="Every number in the answer is checked against the data the tools returned"
+    >
+      {ok
+        ? `✓ All ${v.checked} numbers verified against your data`
+        : `⚠ ${v.unverified.length} of ${v.checked} numbers couldn't be verified: ${v.unverified.join(", ")}`}
+      {v.truncated && " · results were cut at 200 rows"}
+    </p>
   );
 }

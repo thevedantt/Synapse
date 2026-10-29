@@ -95,3 +95,22 @@ CREATE TABLE IF NOT EXISTS chats (
 );
 CREATE INDEX IF NOT EXISTS chats_user ON chats (user_email, updated_at DESC);
 -- app_users, audit_log and chats get no grants: the agent's logins cannot read them.
+
+-- Action Center: things the agent proposes (confirm COD orders, restock...). Nothing runs
+-- until a person approves it. Written only by trusted server code, never by agent SQL.
+CREATE TABLE IF NOT EXISTS actions (
+  id bigserial PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  created_by text NOT NULL,
+  role text NOT NULL,
+  region text,
+  kind text NOT NULL CHECK (kind IN ('cod_confirmation', 'restock')),
+  title text NOT NULL,
+  reason text NOT NULL,
+  payload jsonb NOT NULL,
+  status text NOT NULL DEFAULT 'proposed'
+    CHECK (status IN ('proposed', 'approved', 'rejected', 'executed', 'failed')),
+  decided_by text,
+  decided_at timestamptz,
+  result jsonb
+);
