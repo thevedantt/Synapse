@@ -8,6 +8,7 @@ The schema (tables, columns, meanings from COMMENT ON) is also published as an M
 resource, so the agent knows it up front instead of spending LLM calls discovering it.
 """
 
+import atexit
 import json
 import os
 import re
@@ -40,6 +41,7 @@ POOLS = {
     )
     for role in ROLES
 }
+atexit.register(lambda: [p.close() for p in POOLS.values()])  # clean, fast shutdown
 
 mcp = MCPServer("postgres", instructions="Read-only access to the company sales database.")
 
@@ -88,7 +90,7 @@ def as_json(rows: list[dict]) -> str:
     # Money columns also get a ready-to-copy Indian-format string (e.g. revenue_fmt).
     for r in rows:
         for k, v in list(r.items()):
-            if isinstance(v, (Decimal, int, float)) and not isinstance(v, bool) and MONEY.search(k):
+            if isinstance(v, (Decimal, int, float)) and not isinstance(v, bool) and MONEY.search(k) and not k.endswith("_pct"):
                 r[f"{k}_fmt"] = inr(v)
     result = {"rows": rows[:MAX_ROWS], "truncated": len(rows) > MAX_ROWS}
     return json.dumps(result, default=str, ensure_ascii=False)  # default=str handles Decimal/date
@@ -123,6 +125,71 @@ def describe_table(table: str, ctx: Context) -> str:
         "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
         "WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position",
         (table,)))
+
+
+# Trust layer: ONE definition per business metric, so the same question always gives the
+# same number. Only these whitelisted SQL fragments are ever used; filter values are params.
+METRICS = {
+    "revenue": "SUM(o.amount_inr) FILTER (WHERE o.status = 'completed')",
+    "orders": "COUNT(*)",
+    "units": "SUM(o.quantity)",
+    "customers": "COUNT(DISTINCT o.customer_id)",
+    "aov": "SUM(o.amount_inr) FILTER (WHERE o.status = 'completed') "
+           "/ NULLIF(COUNT(*) FILTER (WHERE o.status = 'completed'), 0)",
+    "gross_margin": "SUM((pr.price_inr - pr.cost_inr) * o.quantity) FILTER (WHERE o.status = 'completed')",
+    "rto_rate_pct": "100.0 * COUNT(*) FILTER (WHERE o.status = 'rto') "
+                    "/ NULLIF(COUNT(*) FILTER (WHERE o.courier IS NOT NULL AND o.status <> 'pending'), 0)",
+    "refund_rate_pct": "100.0 * COUNT(*) FILTER (WHERE o.status = 'refunded') "
+                       "/ NULLIF(COUNT(*) FILTER (WHERE o.status IN ('completed', 'refunded')), 0)",
+    "cod_share_pct": "100.0 * COUNT(*) FILTER (WHERE o.payment_method = 'COD') / NULLIF(COUNT(*), 0)",
+}
+DIMENSIONS = {
+    "region": "cu.region", "city": "cu.city", "pincode": "cu.pincode", "channel": "o.channel",
+    "payment_method": "o.payment_method", "courier": "o.courier", "category": "pr.category",
+    "product": "pr.name", "day": "o.order_date",
+    "week": "date_trunc('week', o.order_date)::date", "month": "to_char(o.order_date, 'YYYY-MM')",
+}
+
+
+@mcp.tool()
+def get_metrics(metrics: list[str], start_date: str, end_date: str, ctx: Context,
+                group_by: list[str] | None = None, filters: dict[str, str] | None = None,
+                compare_start_date: str | None = None, compare_end_date: str | None = None) -> str:
+    """PREFERRED for standard numbers: verified, consistent business metrics.
+    metrics: any of revenue, orders, units, customers, aov (average order value),
+      gross_margin, rto_rate_pct, refund_rate_pct, cod_share_pct.
+    start_date / end_date: YYYY-MM-DD, inclusive (by order date).
+    group_by: any of region, city, pincode, channel, payment_method, courier, category, product,
+      day, week, month.  filters: {dimension: value}, e.g. {"region": "South"}.
+    compare_start_date / compare_end_date: an earlier period to compare with (e.g. last
+      month). Adds <metric>_prev and <metric>_change_pct: use these, don't calculate.
+    Use run_sql only for things these metrics can't express."""
+    group_by, filters = group_by or [], filters or {}
+    bad = [m for m in metrics if m not in METRICS] + [d for d in [*group_by, *filters] if d not in DIMENSIONS]
+    if bad or not metrics:
+        return json.dumps({"error": f"Unknown metric/dimension: {bad}. Metrics: {list(METRICS)}; "
+                                    f"dimensions: {list(DIMENSIONS)}"})
+    select = [f"{DIMENSIONS[d]} AS {d}" for d in group_by] + [f"round({METRICS[m]}, 2) AS {m}" for m in metrics]
+    where = ["o.order_date BETWEEN %s::date AND %s::date"] + [f"{DIMENSIONS[d]}::text = %s" for d in filters]
+    sql = (f"SELECT {', '.join(select)} FROM orders o JOIN customers cu ON cu.id = o.customer_id "
+           f"JOIN products pr ON pr.id = o.product_id WHERE {' AND '.join(where)}")
+    if group_by:
+        sql += f" GROUP BY {', '.join(str(i + 1) for i in range(len(group_by)))}"
+        sql += f" ORDER BY {', '.join(str(i + 1) for i in range(len(group_by)))}"
+    try:
+        rows = query(db_role(ctx), sql, (start_date, end_date, *filters.values()))
+        if compare_start_date and compare_end_date:
+            prev = {tuple(r[d] for d in group_by): r for r in
+                    query(db_role(ctx), sql, (compare_start_date, compare_end_date, *filters.values()))}
+            for r in rows:
+                p = prev.get(tuple(r[d] for d in group_by), {})
+                for m in metrics:
+                    r[f"{m}_prev"] = p.get(m)
+                    if r[m] is not None and p.get(m):
+                        r[f"{m}_change_pct"] = round((r[m] - p[m]) / p[m] * 100, 1)
+        return as_json(rows)
+    except psycopg.Error as e:
+        return json.dumps({"error": str(e).strip()})
 
 
 @mcp.tool()
