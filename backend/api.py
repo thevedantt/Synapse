@@ -142,6 +142,7 @@ class ChatResponse(BaseModel):
     reply: str
     tool_calls: list[dict]
     blocked: bool = False
+    verification: dict | None = None  # trust layer: how many numbers were proven
 
 
 @app.get("/me")

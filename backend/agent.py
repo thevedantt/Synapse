@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+import trust
+
 load_dotenv()
 log = logging.getLogger("synapse")
 BACKEND_DIR = Path(__file__).parent
@@ -32,19 +34,26 @@ SERVERS = {
     "slack": BACKEND_DIR / "servers" / "slack_server.py",
     "reports": BACKEND_DIR / "servers" / "report_server.py",
     "sheets": BACKEND_DIR / "servers" / "sheets_server.py",
+    "ops": BACKEND_DIR / "servers" / "ops_server.py",
 }
 
 SYSTEM = """You are Synapse, an enterprise assistant for an Indian e-commerce brand.
 Always respond in English.
 The company is in India. All money is in Indian Rupees: write amounts Indian-style,
 e.g. ₹1,24,999, and use lakh / crore for big numbers (₹12.5 lakh, ₹3.2 crore).
-Use the tools to get real data; never invent numbers. The database schema is below: write
-SQL from it directly (describe_table only if unsure). Aggregate in SQL, not raw rows.
-Definitions: revenue = SUM(amount_inr) WHERE status = 'completed'. RTO rate = rto orders /
-shipped orders that are no longer pending (courier IS NOT NULL AND status <> 'pending').
+Use the tools to get real data; never invent numbers. Every number you write is checked
+against the tool results, so copy numbers from them: for money use the ready-made *_fmt
+strings (e.g. revenue_fmt). Don't do your own unit conversions.
+For standard metrics (revenue, orders, units, customers, AOV, gross margin, RTO rate,
+refund rate, COD share) ALWAYS use get_metrics: these are the company's official
+definitions. Use run_sql for anything else (reviews, stock, festivals, customer lists).
+The database schema is below: write SQL from it directly (describe_table only if unsure).
 Region is on customers: JOIN customers to filter or group orders by region.
+If a result says "truncated": true, say the list was cut at 200 rows.
+The current month/week isn't over: never call it a drop vs a full previous period. Compare
+the same number of days (e.g. 1-28 Oct vs 1-28 Sep), or clearly say the period is partial.
 Be fast: plan every query you need first, then run them ALL in the same step (several
-run_sql calls at once), or combine them into one SQL query. Avoid one-query-per-step.
+tool calls at once). Avoid one-query-per-step.
 Keep answers short and skimmable (under ~150 words) unless the user asks for detail.
 Answer with a short summary of the findings, key numbers, and insights.
 Data access depends on the user's role and is enforced by the database: if a query
@@ -56,7 +65,13 @@ summary, then tell the user it was sent.
 Only create a report when the user asks for one. Pass all the data you found to
 create_report, then give the user its download_url exactly as returned (it starts with
 /api/reports/, no domain) as a Markdown link: [Download report](/api/reports/...).
-Only export to Google Sheets when the user asks; then share the returned url as a link."""
+Only export to Google Sheets when the user asks; then share the returned url as a link.
+RTO / risky COD orders: use score_cod_risk and explain the reasons it gives.
+Stock, stockouts, reorders, festival demand: use stock_forecast.
+You never act directly on customers or suppliers. When an action would help (confirm risky
+COD orders on WhatsApp with a prepaid link, restock), offer it; if the user agrees or asks,
+call propose_action with the numbers as the reason, and say it now waits for approval in
+the Action Center."""
 
 
 def system_prompt(user: dict, context: str = "") -> str:
@@ -117,13 +132,25 @@ async def call_tool(owner: dict[str, ClientSession], tool_use: dict, user: dict)
     return {"toolResult": {"toolUseId": tool_use["toolUseId"], "content": [{"text": text}], "status": status}}
 
 
+def evidence(messages: list) -> list[str]:
+    """What an answer's numbers may come from: tool results and the user's own words
+    (e.g. "last 30 days"), across the whole chat."""
+    out = []
+    for m in messages:
+        for b in m["content"]:
+            if m["role"] == "user" and "text" in b:
+                out.append(b["text"])
+            out += [c["text"] for c in b.get("toolResult", {}).get("content", []) if "text" in c]
+    return out
+
+
 async def run_turn(client, tools: list, owner: dict, messages: list, user: dict, context: str = "",
                    gate: asyncio.Future | None = None) -> dict:
     """Agent loop for one user message. Appends to `messages` in place.
     Returns {"reply": final text, "tool_calls": [{"name", "input"}, ...]}.
     `gate`: a running safety check (guardrail). The first LLM call runs while it checks;
     nothing is executed or shown until it passes. Blocked -> {"blocked": True}."""
-    tool_calls = []
+    tool_calls, retried = [], False
     for step in range(MAX_STEPS):
         t0 = time.perf_counter()
         response = await asyncio.to_thread(
@@ -148,7 +175,17 @@ async def run_turn(client, tools: list, owner: dict, messages: list, user: dict,
             text = re.sub(r"https?://[^\s)\]]*?(/api/reports/[\w-]+)", r"\1", text)
             if response["stopReason"] == "max_tokens":
                 text += "\n[Answer cut off: hit max tokens.]"
-            return {"reply": text, "tool_calls": tool_calls}
+            # Trust layer: every number must trace back to the data. One automatic retry.
+            verification = trust.check(text, evidence(messages))
+            if verification["unverified"] and not retried:
+                retried = True
+                log.info("trust: unverified %s, asking the model to fix", verification["unverified"])
+                messages.append({"role": "user", "content": [{"text": (
+                    "[Automatic check] These numbers in your answer don't match the tool results: "
+                    f"{', '.join(verification['unverified'])}. Check them against the data (query again "
+                    "if needed) and rewrite your full answer using only numbers from tool results.")}]})
+                continue
+            return {"reply": text, "tool_calls": tool_calls, "verification": verification}
 
         calls = [b["toolUse"] for b in message["content"] if "toolUse" in b]
         tool_calls += [{"name": c["name"], "input": c.get("input")} for c in calls]
